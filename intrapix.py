@@ -109,9 +109,9 @@ def Pixelate(prf, nx, ny, res):
   for i in range(nx):
     for j in range(ny):
       pix[i][j] = np.sum(prf[j * res:(j + 1) * res, i * res:(i + 1) * res])
-  return pix
+  return pix.T
 
-def Animate(nx = 8, ny = 8, res = 100, sx = 1.5, sy = 0.75, amp = 1.,
+def Animate(nx = 8, ny = 8, res = 100, sx = 0.75, sy = 0.5, amp = 1.,
             theta = -0.3, cx = [0.75, 1, -1], cy = [0.75, 1, -1],
             eps = 0.1, dx = 0.25, dy = 0.25):
   '''
@@ -121,17 +121,20 @@ def Animate(nx = 8, ny = 8, res = 100, sx = 1.5, sy = 0.75, amp = 1.,
   
   # Construct the grids
   x0 = nx / 2. - 1
-  y0 = ny / 2. - 1
+  y0 = ny / 2. - 1  
   psv = PSV(nx, ny, res, eps)
   ipv = IPV(nx, ny, res, cx, cy)
   psf = PSF(nx, ny, res, x0, y0, sx, sy, amp, theta)
   prf = psv * ipv * psf
-
+  flx = Pixelate(prf, nx, ny, res)
+  
   # Plot
-  fig, ax = pl.subplots(1, figsize = (5,5))
-  image = ax.imshow(prf, extent = (0, nx, 0, ny), origin = 'lower')
-  ax.set_xticks([])
-  ax.set_yticks([])
+  fig, ax = pl.subplots(1,2, figsize = (10,5))
+  hires = ax[0].imshow(prf, extent = (0, nx, 0, ny), origin = 'lower')
+  lores = ax[1].imshow(flx, extent = (0, nx, 0, ny), origin = 'lower')
+  for axis in ax:
+    axis.set_xticks([])
+    axis.set_yticks([])
 
   # Animate!
   def data_gen():
@@ -140,18 +143,24 @@ def Animate(nx = 8, ny = 8, res = 100, sx = 1.5, sy = 0.75, amp = 1.,
     while True:
       x += dx * np.random.randn()
       y += dy * np.random.randn()
-      if y < 0:
-        y = 0
-      elif x < 0:
-        x = 0
+      if y < 1:
+        y = 1
+      elif y > ny - 1:
+        y = ny - 1
+      if x < 1:
+        x = 1
+      elif x > nx - 1:
+        x = nx - 1
       yield x, y
       
   def run(data):
     x0, y0 = data
     psf = PSF(nx, ny, res, x0, y0, sx, sy, amp, theta)
     prf = psv * ipv * psf
-    image.set_data(prf)
-    return image,
+    flx = Pixelate(prf, nx, ny, res)
+    hires.set_data(prf)
+    lores.set_data(flx)
+    return hires, lores
     
   ani = animation.FuncAnimation(fig, run, data_gen, interval=10, repeat=False)
   pl.show()
