@@ -44,7 +44,7 @@ def Gauss2D(x, y, x0, y0, sx, sy, theta):
   a = ((np.cos(theta) ** 2) / (2 * sx ** 2)) + ((np.sin(theta) ** 2) / (2 * sy ** 2))
   b = -((np.sin(2 * theta)) / (4 * sx ** 2)) + ((np.sin(2 * theta)) / (4 * sy ** 2))
   c = ((np.sin(theta) ** 2) / (2 * sx ** 2)) + ((np.cos(theta) ** 2) / (2 * sy ** 2))
-  norm = 1. / (2 * np.pi * sx * sy)
+  norm = 1. / (2 * np.pi * sx * sy) # this is wrong (only for theta = 0)
   return norm * np.exp(-(a * (x - x0) ** 2 + 2 * b * (x - x0) * (y - y0) + c * (y - y0) ** 2))
 
 def GaussMixture2D(X, Y, x0, y0, sx, sy, amp, theta):
@@ -77,8 +77,6 @@ def IPV(nx, ny, res, cx, cy):
   
   '''
   
-  NormalizeIPV(cx)
-  NormalizeIPV(cy)
   z = np.linspace(0, 1, res)
   ipv = np.ones((ny * res, nx * res))  
   for i in range(nx):
@@ -87,17 +85,18 @@ def IPV(nx, ny, res, cx, cy):
     ipv[j * res:(j + 1) * res, :] *= Polynomial(z, cy).reshape(-1,1)
   return ipv
 
-def PSV(nx, ny, res, eps):
-  '''
-  Inter-pixel sensitivity variation function, given amplitude `eps`
-  
+def Zoom(arr, res):
   '''
   
-  psv = np.ones((ny * res, nx * res))
+  '''
+  
+  assert type(res) is int and res > 1, "Argument `res` must be a positive integer."
+  ny, nx = np.shape(arr)
+  zarr = np.ones((ny * res, nx * res))
   for i in range(nx):
     for j in range(ny):
-      psv[j * res:(j + 1) * res, i * res:(i + 1) * res] = 1 + eps * np.random.randn()
-  return psv
+      zarr[j * res:(j + 1) * res, i * res:(i + 1) * res] = arr[j,i]
+  return zarr
 
 def PSF(nx, ny, res, x0, y0, sx, sy, amp, theta):
   '''
@@ -120,17 +119,24 @@ def Pixelate(prf, nx, ny, res):
       pix[i][j] = np.sum(prf[j * res:(j + 1) * res, i * res:(i + 1) * res])
   return pix.T
 
-def NormalizeIPV(c):
+def PixelateQuad(nx, ny, x0, y0, sx, sy, amp, theta, cx, cy, psv):
   '''
-  Sets the first IPV coefficient by requiring that the IPV integrate 
-  to 1 over the interval [0,1].
+  Not yet working...
   
   '''
   
-  c[0] = 1 - np.sum([c[n] / (n + 1) for n in range(1, len(c))])
-
+  pix = np.empty((nx, ny))
+  for i in range(nx):
+    for j in range(ny):
+      F = lambda y, x: Polynomial(x - np.floor(x), cx) * \
+                       Polynomial(y - np.floor(y), cy) * \
+                       psv[j][i] * \
+                       Gauss2D(x, y, x0, y0, sx, sy, theta)
+      pix[j][i] = dblquad(F, i, i+1, lambda x: j, lambda x: j+1)[0]  
+  return pix
+  
 def Animate(nx = 8, ny = 8, res = 100, sx = 1.0, sy = 0.75, amp = 1.,
-            theta = -0.3, cx = [5/6, 1, -1], cy = [5/6, 1, -1], eps = 0.1):
+            theta = -0.3, cx = [0.75, 1, -1], cy = [0.75, 1, -1], eps = 0.1):
   '''
   Animate the high resolution PRF with a random walk across the detector
   
@@ -143,10 +149,11 @@ def Animate(nx = 8, ny = 8, res = 100, sx = 1.0, sy = 0.75, amp = 1.,
   cad = np.arange(0, len(x0))
   
   # Construct the grids
-  psv = PSV(nx, ny, res, eps)
+  psv = 1 + eps * np.random.randn(ny, nx)
+  psvz = Zoom(psv, res)
   ipv = IPV(nx, ny, res, cx, cy)
   psf = PSF(nx, ny, res, x0[0], y0[0], sx, sy, amp, theta)
-  prf = psv * ipv * psf
+  prf = psvz * ipv * psf
   flx = Pixelate(prf, nx, ny, res)
   
   # Plot
@@ -177,7 +184,7 @@ def Animate(nx = 8, ny = 8, res = 100, sx = 1.0, sy = 0.75, amp = 1.,
   # Animate!
   def run(i):
     psf = PSF(nx, ny, res, x0[i], y0[i], sx, sy, amp, theta)
-    prf = psv * ipv * psf
+    prf = psvz * ipv * psf
     flx = Pixelate(prf, nx, ny, res)
     hires.set_data(prf)
     lores.set_data(flx)
@@ -201,8 +208,8 @@ def LnLike(p, **kwargs):
   sy = p[1]
   theta = p[2]
   eps = p[3]
-  cx = np.append([0], p[4:4+ipv_order+1])
-  cy = np.append([0], p[4+1+ipv_order:])
+  cx = p[4:4+ipv_order+1]
+  cy = p[4+1+ipv_order:]
   
 def RunMCMC():
   '''
@@ -215,8 +222,8 @@ def RunMCMC():
   res = 100
   
   # The "true" parameters
-  cx = [5/6, 1, -1]
-  cy = [5/6, 1, -1]
+  cx = [0.75, 1, -1]
+  cy = [0.75, 1, -1]
   theta = 0.3
   sx = 0.5
   sy = 0.75
@@ -230,14 +237,14 @@ def RunMCMC():
   ncad = len(x0)
   
   # Construct the sensitivity map
-  psv = PSV(nx, ny, res, eps)
+  psv = 1 + eps * np.random.randn(ny, nx)
   ipv = IPV(nx, ny, res, cx, cy)
   
   # Compute the pixel fluxes
   fpix = np.empty((ncad, nx, ny))
   for i in range(ncad):
     psf = PSF(nx, ny, res, x0[i], y0[i], sx, sy, amp, theta)
-    prf = psv * ipv * psf
+    prf = Zoom(psv, res) * ipv * psf
     fpix[i] = Pixelate(prf, nx, ny, res)
 
   # Our initial guess
