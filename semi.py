@@ -9,17 +9,12 @@ semi.py
 from __future__ import division, print_function, absolute_import, unicode_literals
 import numpy as np
 import matplotlib.pyplot as pl
+import matplotlib.animation as animation
 from scipy.special import erf
 from scipy.integrate import quad, dblquad
 import timeit, builtins
-
-def Polynomial(x, coeffs):
-  '''
-  Returns a polynomial with coefficients `coeffs` evaluated at `x`
-  
-  '''
-  
-  return np.sum([c * x ** m for m, c in enumerate(coeffs)], axis = 0)
+from tqdm import tqdm
+prange = lambda x: tqdm(range(x))
 
 class GaussInt(object):
   '''
@@ -56,6 +51,51 @@ class GaussInt(object):
       # TODO
       return 0.
 
+def Zoom(arr, res):
+  '''
+  
+  '''
+  
+  assert type(res) is int and res > 1, "Argument `res` must be a positive integer."
+  ny, nx = np.shape(arr)
+  zarr = np.ones((ny * res, nx * res))
+  for i in range(nx):
+    for j in range(ny):
+      zarr[j * res:(j + 1) * res, i * res:(i + 1) * res] = arr[j,i]
+  return zarr
+
+def Grid(nx, ny, res):
+  '''
+  
+  '''
+  
+  x = np.linspace(0, nx, nx * res)
+  y = np.linspace(0, ny, ny * res)
+  X, Y = np.meshgrid(x, y)
+  return X, Y
+
+def Polynomial(x, coeffs):
+  '''
+  Returns a polynomial with coefficients `coeffs` evaluated at `x`
+  
+  '''
+  
+  return np.sum([c * x ** m for m, c in enumerate(coeffs)], axis = 0)
+
+def IPV(nx, ny, res, cx, cy):
+  '''
+  Intra-pixel variability function, given coefficient arrays `cx` and `cy`
+  
+  '''
+  
+  z = np.linspace(0, 1, res)
+  ipv = np.ones((ny * res, nx * res))  
+  for i in range(nx):
+    ipv[:, i * res:(i + 1) * res] *= Polynomial(z, cx).reshape(1,-1)
+  for j in range(ny):
+    ipv[j * res:(j + 1) * res, :] *= Polynomial(z, cy).reshape(-1,1)
+  return ipv
+
 def PolyGaussIntegrand1D(y, cx, cy, amp, x0, y0, sx, sy, rho):
   '''
   
@@ -88,6 +128,14 @@ def PolyGaussIntegrand1D(y, cx, cy, amp, x0, y0, sx, sy, rho):
   # We're done!
   return f * g
 
+def Gauss2D(x, y, amp, x0, y0, sx, sy, rho):
+  '''
+  
+  '''
+  
+  norm = (2 * np.pi * sx * sy * np.sqrt(1 - rho ** 2))
+  return (amp / norm) * np.exp(-((x - x0) ** 2 / sx ** 2 + (y - y0) ** 2 / sy ** 2 - 2 * rho * (x - x0) * (y - y0) / (sx * sy)) / (2 * (1 - rho ** 2)))
+
 def PolyGaussIntegrand2D(x, y, cx, cy, amp, x0, y0, sx, sy, rho):
   '''
   
@@ -101,11 +149,8 @@ def PolyGaussIntegrand2D(x, y, cx, cy, amp, x0, y0, sx, sy, rho):
   g = Polynomial(x, cx)
   
   # Loop over the components of the PSF
-  h = y * 0.
-  for k in range(K):
-    norm = (2 * np.pi * sx[k] * sy[k] * np.sqrt(1 - rho[k] ** 2))
-    h += (amp[k] / norm) * np.exp(-((x - x0[k]) ** 2 / sx[k] ** 2 + (y - y0[k]) ** 2 / sy[k] ** 2 - 2 * rho[k] * (x - x0[k]) * (y - y0[k]) / (sx[k] * sy[k])) / (2 * (1 - rho[k] ** 2)))
-  
+  h = np.sum([Gauss2D(x, y, amp[k], x0[k], y0[k], sx[k], sy[k], rho[k]) for k in range(K)], axis = 0)
+
   # We're done!
   return f * g * h
 
@@ -150,6 +195,115 @@ def PixelFlux(cx, cy, amp, x0, y0, sx, sy, rho, semi = True, **kwargs):
     F = lambda y, x: PolyGaussIntegrand2D(x, y, cx, cy, amp, x0, y0, sx, sy, rho)
     res, err = dblquad(F, 0, 1, lambda x: 0, lambda x: 1, **kwargs)
   return res
+
+def GenerateData(nx = 8, ny = 8, sx = 0.5, sy = 0.75, amp = 1.,
+                 rho = 0.3, cx = [0.75, 1, -1], cy = [0.75, 1, -1],
+                 motion_file = '201367065', data_file = '201367065', **kwargs):
+  '''
   
+  '''
+  
+  # Vectorize the PSF params
+  rho = np.atleast_1d(rho)
+  sx = np.atleast_1d(sx)
+  sy = np.atleast_1d(sy)
+  amp = np.atleast_1d(amp)
+  
+  # Load the motion vectors
+  motion_vectors = np.load('data/motion/%s.npz' % motion_file)
+  x0 = (motion_vectors['x0'] + nx / 2.).reshape(-1, 1)
+  y0 = (motion_vectors['y0'] + ny / 2.).reshape(-1, 1)
+  ncad = kwargs.pop('ncad', len(x0))
+  
+  # Loop over the time and pixel arrays
+  fpix = np.zeros((ncad, nx, ny))
+  for n in prange(ncad):
+    for i in range(nx):
+      for j in range(ny):
+        fpix[n,j,i] = PixelFlux(cx, cy, amp, x0[n] - i, y0[n] - ny + j + 1, sx, sy, rho, **kwargs)
+
+  # Save
+  np.savez('data/flux/%s.npz' % data_file, fpix = fpix, nx = nx, ny = ny, sx = sx, sy = sy,
+           amp = amp, rho = rho, cx = cx, cy = cy, motion_file = motion_file, ncad = ncad)
+
+def PlotData(data_file = '201367065', res = 50, **kwargs):
+  '''
+  
+  '''
+  
+  # Load
+  data = np.load('data/flux/%s.npz' % data_file)
+  fpix = data['fpix']
+  ncad = data['ncad']
+  cad = np.arange(ncad)
+  nx, ny = fpix.shape[1], fpix.shape[2]
+  sx = data['sx']
+  sy = data['sy']
+  amp = data['amp']
+  rho = data['rho']
+  cx = data['cx']
+  cy = data['cy']
+  motion_file = data['motion_file']
+  motion_vectors = np.load('data/motion/%s.npz' % motion_file)
+  x0 = (motion_vectors['x0'][:ncad] + nx / 2.).reshape(-1, 1)
+  y0 = (motion_vectors['y0'][:ncad] + ny / 2.).reshape(-1, 1)
+  
+  # Inter-pixel variability
+  psv = 1 + 0.1 * np.random.randn(ny, nx)
+  psvz = Zoom(psv, res)
+  fpix *= psv.reshape(-1, psv.shape[0], psv.shape[1])
+  flux = np.sum(fpix, axis = (1,2))
+  
+  #pl.plot(x0, flux, 'k.')
+  #pl.plot(y0, flux, 'r.')
+  #pl.show()
+  #quit()
+
+  # Compute the high res model
+  X, Y = Grid(nx, ny, res)
+  ipv = IPV(nx, ny, res, cx, cy)
+  fhires = psvz * ipv * np.sum([Gauss2D(X, Y, amp[k], x0[0][k], y0[0][k], sx[k], sy[k], rho[k]) for k in range(len(sx))], axis = 0)
+  fhires = np.flipud(fhires)
+  
+  # Plot
+  fig = pl.figure(figsize = (8, 8))
+  fig.subplots_adjust(top = 0.95, bottom = 0.1, left = 0.1, right = 0.95, wspace = 0.05, hspace = 0.1)
+  axhi = pl.subplot2grid((4, 2), (0, 0), colspan = 1, rowspan = 2)
+  axlo = pl.subplot2grid((4, 2), (0, 1), colspan = 1, rowspan = 2)  
+  axm = pl.subplot2grid((4, 2), (2, 0), colspan = 2, rowspan = 1) 
+  axf = pl.subplot2grid((4, 2), (3, 0), colspan = 2, rowspan = 1) 
+  hires = axhi.imshow(fhires, extent = (0, nx, 0, ny), origin = 'lower', aspect = 'auto')
+  lores = axlo.imshow(fpix[0], extent = (0, nx, 0, ny), origin = 'lower', aspect = 'auto')
+  axm.plot(cad, x0, 'k-', alpha = 0.75, lw = 1)
+  axm.plot(cad, y0, 'r-', alpha = 0.75, lw = 1)
+  axf.plot(cad, flux, 'k.', alpha = 0.3, ms = 1)
+  tracker1 = axm.axvline(0, color = 'r')
+  tracker2 = axf.axvline(0, color = 'r')
+
+  # Appearance
+  for axis in [axhi, axlo]:
+    axis.set_xticks([])
+    axis.set_yticks([])
+  for axis in [axf, axm]:
+    axis.margins(0, None)
+  axm.set_xticklabels([])
+  axm.set_ylabel(r'Position', fontsize = 12)
+  axf.set_ylabel(r'Flux', fontsize = 12)
+  axf.set_xlabel(r'Cadence', fontsize = 12)
+  
+  # Animate!
+  def run(i):
+    fhires = psvz * ipv * np.sum([Gauss2D(X, Y, amp[k], x0[i][k], y0[i][k], sx[k], sy[k], rho[k]) for k in range(len(sx))], axis = 0)
+    fhires = np.flipud(fhires)
+    hires.set_data(fhires)
+    lores.set_data(fpix[i])
+    tracker1.set_xdata([i, i])
+    tracker2.set_xdata([i, i])
+    return hires, lores, tracker1, tracker2
+    
+  ani = animation.FuncAnimation(fig, run, frames=len(x0), interval = 1, repeat=True)
+  pl.show()
+
 if __name__ == '__main__':
-  TestIntegration()
+  #GenerateData()
+  PlotData()

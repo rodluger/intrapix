@@ -143,7 +143,7 @@ def Animate(nx = 8, ny = 8, res = 100, sx = 1.0, sy = 0.75, amp = 1.,
   '''
     
   # Load the motion vectors
-  motion_vectors = np.load('data/motion_vectors.npz')
+  motion_vectors = np.load('data/motion/201367065.npz')
   x0 = motion_vectors['x0'][2140:] + nx / 2.
   y0 = motion_vectors['y0'][2140:] + ny / 2.
   cad = np.arange(0, len(x0))
@@ -231,7 +231,7 @@ def RunMCMC():
   amp = 1
   
   # Load the motion vectors
-  motion_vectors = np.load('data/motion_vectors.npz')
+  motion_vectors = np.load('data/motion/201367065.npz')
   x0 = motion_vectors['x0'][3500:] + nx / 2.
   y0 = motion_vectors['y0'][3500:] + ny / 2.
   ncad = len(x0)
