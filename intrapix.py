@@ -10,6 +10,7 @@ from __future__ import division, print_function, absolute_import, unicode_litera
 import numpy as np
 import matplotlib.pyplot as pl
 import matplotlib.animation as animation
+from matplotlib.ticker import FuncFormatter
 from scipy.special import erf
 from scipy.integrate import quad, dblquad
 import timeit, builtins
@@ -226,7 +227,7 @@ def GenerateData(nx = 8, ny = 8, sx = 0.5, sy = 0.75, amp = 1.,
   np.savez('data/flux/%s.npz' % data_file, fpix = fpix, nx = nx, ny = ny, sx = sx, sy = sy,
            amp = amp, rho = rho, cx = cx, cy = cy, motion_file = motion_file, ncad = ncad)
 
-def PlotData(data_file = '201367065', res = 50, **kwargs):
+def PlotData(data_file = '201367065', res = 50, eps = 0.1, **kwargs):
   '''
   
   '''
@@ -249,16 +250,11 @@ def PlotData(data_file = '201367065', res = 50, **kwargs):
   y0 = (motion_vectors['y0'][:ncad] + ny / 2.).reshape(-1, 1)
   
   # Inter-pixel variability
-  psv = 1 + 0.1 * np.random.randn(ny, nx)
+  psv = np.maximum(0, np.minimum(1, 1 + eps * np.random.randn(ny, nx)))
   psvz = Zoom(psv, res)
   fpix *= psv.reshape(-1, psv.shape[0], psv.shape[1])
   flux = np.sum(fpix, axis = (1,2))
   
-  #pl.plot(x0, flux, 'k.')
-  #pl.plot(y0, flux, 'r.')
-  #pl.show()
-  #quit()
-
   # Compute the high res model
   X, Y = Grid(nx, ny, res)
   ipv = IPV(nx, ny, res, cx, cy)
@@ -266,30 +262,47 @@ def PlotData(data_file = '201367065', res = 50, **kwargs):
   fhires = np.flipud(fhires)
   
   # Plot
-  fig = pl.figure(figsize = (8, 8))
-  fig.subplots_adjust(top = 0.95, bottom = 0.1, left = 0.1, right = 0.95, wspace = 0.05, hspace = 0.1)
-  axhi = pl.subplot2grid((4, 2), (0, 0), colspan = 1, rowspan = 2)
-  axlo = pl.subplot2grid((4, 2), (0, 1), colspan = 1, rowspan = 2)  
-  axm = pl.subplot2grid((4, 2), (2, 0), colspan = 2, rowspan = 1) 
-  axf = pl.subplot2grid((4, 2), (3, 0), colspan = 2, rowspan = 1) 
+  fig = pl.figure(figsize = (12, 8))
+  fig.subplots_adjust(top = 0.95, bottom = 0.1, left = 0.075, right = 0.925, wspace = 0.05, hspace = 0.1)
+  axccd = pl.subplot2grid((4, 3), (0, 0), colspan = 1, rowspan = 2)  
+  axhi = pl.subplot2grid((4, 3), (0, 1), colspan = 1, rowspan = 2)
+  axlo = pl.subplot2grid((4, 3), (0, 2), colspan = 1, rowspan = 2)  
+  axm = pl.subplot2grid((4, 3), (2, 0), colspan = 2, rowspan = 1) 
+  axf = pl.subplot2grid((4, 3), (3, 0), colspan = 2, rowspan = 1) 
+  axc = pl.subplot2grid((4, 3), (2, 2), colspan = 1, rowspan = 2)
+  axccd.imshow(np.flipud(psvz * ipv), extent = (0, nx, 0, ny), origin = 'lower', aspect = 'auto', cmap = pl.get_cmap('Greys_r'))
   hires = axhi.imshow(fhires, extent = (0, nx, 0, ny), origin = 'lower', aspect = 'auto')
   lores = axlo.imshow(fpix[0], extent = (0, nx, 0, ny), origin = 'lower', aspect = 'auto')
-  axm.plot(cad, x0, 'k-', alpha = 0.75, lw = 1)
-  axm.plot(cad, y0, 'r-', alpha = 0.75, lw = 1)
+  axm.plot(cad, x0, 'k-', alpha = 0.75, lw = 1, label = 'X')
+  axm.plot(cad, y0, 'r-', alpha = 0.75, lw = 1, label = 'Y')
   axf.plot(cad, flux, 'k.', alpha = 0.3, ms = 1)
+  axc.plot(x0, flux, 'k.', alpha = 0.3, label = 'X')
+  axc.plot(y0, flux, 'r.', alpha = 0.3, label = 'Y')
   tracker1 = axm.axvline(0, color = 'r')
   tracker2 = axf.axvline(0, color = 'r')
 
   # Appearance
-  for axis in [axhi, axlo]:
+  for axis in [axccd, axhi, axlo]:
     axis.set_xticks([])
     axis.set_yticks([])
   for axis in [axf, axm]:
-    axis.margins(0, None)
+    axis.margins(0, 0.2)
   axm.set_xticklabels([])
   axm.set_ylabel(r'Position', fontsize = 12)
   axf.set_ylabel(r'Flux', fontsize = 12)
   axf.set_xlabel(r'Cadence', fontsize = 12)
+  axm.get_yaxis().set_major_formatter(FuncFormatter(lambda x, p : '%.2f' % x))
+  axf.get_yaxis().set_major_formatter(FuncFormatter(lambda x, p : '%.2f' % x))
+  axc.get_yaxis().set_major_formatter(FuncFormatter(lambda x, p : '%.2f' % x))
+  axm.legend(loc = 'upper left', fontsize = 10)
+  axc.legend(loc = 'upper left', fontsize = 10)
+  axc.set_ylabel(r'Position', fontsize = 12)
+  axc.set_xlabel(r'Flux', fontsize = 12)
+  axc.yaxis.tick_right()
+  axc.yaxis.set_label_position("right")
+  axccd.set_title('Detector Sensitivity')
+  axhi.set_title('Sub-pixel Flux')
+  axlo.set_title('Pixel Flux')
   
   # Animate!
   def run(i):
