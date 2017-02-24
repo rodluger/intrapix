@@ -4,18 +4,65 @@
 intrapix.py
 -----------
 
-In the future:
-
-  G = lambda y, x: Gauss2D(x, y, 5, 5, 0.2, 0.4, 0)
-  print(dblquad(G, 0, 10, lambda x: 0, lambda x: 10))
-
 '''
 
 from __future__ import division, print_function, absolute_import, unicode_literals
 import numpy as np
 import matplotlib.pyplot as pl
 import matplotlib.animation as animation
-from scipy.integrate import dblquad
+from scipy.special import erf
+from scipy.integrate import quad, dblquad
+import timeit, builtins
+from tqdm import tqdm
+prange = lambda x: tqdm(range(x))
+
+class GaussInt(object):
+  '''
+  Returns the definite integrals of x^n * exp(-ax^2 + bx + c) from 0 to 1.
+  
+  '''
+  
+  def __init__(self, a, b, c):
+    '''
+    
+    '''
+    
+    self.a = a
+    self.b = b
+    self.c = c
+    p = np.sqrt(self.a)
+    q = self.b / (2 * p)
+    self.GI0 = np.exp(q ** 2 + self.c) * np.sqrt(np.pi) * (erf(q) + erf(p - q)) / (2 * p)
+
+  def __call__(self, n):
+    '''
+    
+    '''
+    
+    if n == 0:
+      return self.GI0
+    elif n == 1:
+      return (1 / (2 * self.a)) * (np.exp(self.c) * (1 - np.exp(self.b - self.a)) + self.b * self.GI0)
+    elif n == 2:
+      return (1 / (4 * self.a ** 2)) * (np.exp(self.c) * (self.b - (2 * self.a + self.b) * np.exp(self.b - self.a)) + (2 * self.a + self.b ** 2) * self.GI0)
+    elif n == 3:
+      return (1 / (8 * self.a ** 3)) * (np.exp(self.c) * (4 * self.a + self.b ** 2 - (4 * self.a ** 2 + 4 * self.a + 2 * self.a + self.b + self.b ** 2) * np.exp(self.b - self.a)) + self.b * (6 * self.a + self.b ** 2) * self.GI0)
+    else:
+      # TODO
+      return 0.
+
+def Zoom(arr, res):
+  '''
+  
+  '''
+  
+  assert type(res) is int and res > 1, "Argument `res` must be a positive integer."
+  ny, nx = np.shape(arr)
+  zarr = np.ones((ny * res, nx * res))
+  for i in range(nx):
+    for j in range(ny):
+      zarr[j * res:(j + 1) * res, i * res:(i + 1) * res] = arr[j,i]
+  return zarr
 
 def Grid(nx, ny, res):
   '''
@@ -35,42 +82,6 @@ def Polynomial(x, coeffs):
   
   return np.sum([c * x ** m for m, c in enumerate(coeffs)], axis = 0)
 
-def Gauss2D(x, y, x0, y0, sx, sy, theta):
-  '''
-  https://en.wikipedia.org/wiki/Gaussian_function#Two-dimensional_Gaussian_function
-  
-  '''
-  
-  a = ((np.cos(theta) ** 2) / (2 * sx ** 2)) + ((np.sin(theta) ** 2) / (2 * sy ** 2))
-  b = -((np.sin(2 * theta)) / (4 * sx ** 2)) + ((np.sin(2 * theta)) / (4 * sy ** 2))
-  c = ((np.sin(theta) ** 2) / (2 * sx ** 2)) + ((np.cos(theta) ** 2) / (2 * sy ** 2))
-  norm = 1. / (2 * np.pi * sx * sy) # this is wrong (only for theta = 0)
-  return norm * np.exp(-(a * (x - x0) ** 2 + 2 * b * (x - x0) * (y - y0) + c * (y - y0) ** 2))
-
-def GaussMixture2D(X, Y, x0, y0, sx, sy, amp, theta):
-  '''
-  A mixture of 2D Gaussians, each with mean (`x0`, `y0`),
-  standard deviation (`sx`, `sy`), amplitude `amp` and 
-  rotation angle `theta`, evaluated on the mesh `X`, `Y`
-  
-  '''
-  
-  # Ensure we have arrays
-  x0 = np.atleast_1d(x0)
-  y0 = np.atleast_1d(y0)
-  sx = np.atleast_1d(sx)
-  sy = np.atleast_1d(sy)
-  amp = np.atleast_1d(amp)
-  theta = np.atleast_1d(theta)
-  assert len(x0) == len(y0) == len(sx) == len(sy) == len(amp) == len(theta), "Size mismatch!"
-  nmix = len(x0)
-  
-  # Add the gaussians
-  res = np.zeros_like(X)
-  for i in range(nmix):
-    res += amp[i] * Gauss2D(X, Y, x0[i], y0[i], sx[i], sy[i], theta[i])
-  return res
-
 def IPV(nx, ny, res, cx, cy):
   '''
   Intra-pixel variability function, given coefficient arrays `cx` and `cy`
@@ -85,178 +96,214 @@ def IPV(nx, ny, res, cx, cy):
     ipv[j * res:(j + 1) * res, :] *= Polynomial(z, cy).reshape(-1,1)
   return ipv
 
-def Zoom(arr, res):
+def PolyGaussIntegrand1D(y, cx, cy, amp, x0, y0, sx, sy, rho):
   '''
   
   '''
   
-  assert type(res) is int and res > 1, "Argument `res` must be a positive integer."
-  ny, nx = np.shape(arr)
-  zarr = np.ones((ny * res, nx * res))
-  for i in range(nx):
-    for j in range(ny):
-      zarr[j * res:(j + 1) * res, i * res:(i + 1) * res] = arr[j,i]
-  return zarr
+  # Dimensions
+  N = len(cy)
+  K = len(x0)
+  
+  # Get the y IPV
+  f = Polynomial(y, cy)
+  
+  # Our integrand is the expression f * g
+  g = y * 0.
+  
+  # Loop over the components of the PSF
+  for k in range(K):
+  
+    # Get the x Gaussian integrals
+    a = 1 / (2 * (1 - rho[k] ** 2) * sx[k] ** 2)
+    b = ((y - y0[k]) * rho[k] * sx[k] + x0[k] * sy[k]) / ((1 - rho[k] ** 2) * sx[k] ** 2 * sy[k])
+    c = -(x0[k] ** 2 / sx[k] ** 2 + (y - y0[k]) ** 2 / sy[k] ** 2 + 2 * x0[k] * (y - y0[k]) * rho[k] / (sx[k] * sy[k])) / (2 * (1 - rho[k] ** 2))
+    norm = (2 * np.pi * sx[k] * sy[k] * np.sqrt(1 - rho[k] ** 2))
+    GI = GaussInt(a, b, c)
+  
+    # Loop over the orders of the x IPV
+    for n in range(N):
+      g += (amp[k] / norm) * cx[n] * GI(n)
+  
+  # We're done!
+  return f * g
 
-def PSF(nx, ny, res, x0, y0, sx, sy, amp, theta):
-  '''
-  A PSF generated from the sum of any number of 2D Gaussians
-  
+def Gauss2D(x, y, amp, x0, y0, sx, sy, rho):
   '''
   
-  X, Y = Grid(nx, ny, res)
-  return GaussMixture2D(X, Y, x0, y0, sx, sy, amp, theta)
+  '''
+  
+  norm = (2 * np.pi * sx * sy * np.sqrt(1 - rho ** 2))
+  return (amp / norm) * np.exp(-((x - x0) ** 2 / sx ** 2 + (y - y0) ** 2 / sy ** 2 - 2 * rho * (x - x0) * (y - y0) / (sx * sy)) / (2 * (1 - rho ** 2)))
 
-def Pixelate(prf, nx, ny, res):
-  '''
-  Integrate the PSF over each of the pixels
-  
+def PolyGaussIntegrand2D(x, y, cx, cy, amp, x0, y0, sx, sy, rho):
   '''
   
-  pix = np.empty((nx, ny))
-  for i in range(nx):
-    for j in range(ny):
-      pix[i][j] = np.sum(prf[j * res:(j + 1) * res, i * res:(i + 1) * res])
-  return pix.T
+  '''
+  
+  # Dimensions
+  K = len(x0)
+  
+  # Get the IPV functions
+  f = Polynomial(y, cy)
+  g = Polynomial(x, cx)
+  
+  # Loop over the components of the PSF
+  h = np.sum([Gauss2D(x, y, amp[k], x0[k], y0[k], sx[k], sy[k], rho[k]) for k in range(K)], axis = 0)
 
-def PixelateQuad(nx, ny, x0, y0, sx, sy, amp, theta, cx, cy, psv):
+  # We're done!
+  return f * g * h
+
+def TestIntegration():
   '''
-  Not yet working...
   
   '''
   
-  pix = np.empty((nx, ny))
-  for i in range(nx):
-    for j in range(ny):
-      F = lambda y, x: Polynomial(x - np.floor(x), cx) * \
-                       Polynomial(y - np.floor(y), cy) * \
-                       psv[j][i] * \
-                       Gauss2D(x, y, x0, y0, sx, sy, theta)
-      pix[j][i] = dblquad(F, i, i+1, lambda x: j, lambda x: j+1)[0]  
-  return pix
+  # Define the params
+  cx = np.random.randn(3); cx[0] = np.abs(cx[0])
+  cy = np.random.randn(3); cy[0] = np.abs(cy[0])
+  amp = [1.]
+  x0 = np.random.randn(1)
+  y0 = np.random.randn(1)
+  sx = 0.5 + 0.1 * np.random.randn(1)
+  sy = 0.5 + 0.1 * np.random.randn(1)
+  rho = 2 * (np.random.rand(1) - 0.5)
   
-def Animate(nx = 8, ny = 8, res = 100, sx = 1.0, sy = 0.75, amp = 1.,
-            theta = -0.3, cx = [0.75, 1, -1], cy = [0.75, 1, -1], eps = 0.1):
+  # Define our semi-analytic and numerical integrators
+  fsem = lambda: PixelFlux(cx, cy, amp, x0, y0, sx, sy, rho, semi = True)
+  fnum = lambda: PixelFlux(cx, cy, amp, x0, y0, sx, sy, rho, semi = False)
+  
+  # Time the calls to each function
+  builtins.__dict__.update(locals())
+  tsem = timeit.timeit('fsem()', number = 100) / 100.
+  tnum = timeit.timeit('fnum()', number = 100) / 100.
+  
+  # Print
+  print("Semi-analytic (%.1e s): %.9e" % (tsem, fsem()))
+  print("Numerical     (%.1e s): %.9e" % (tnum, fnum()))
+  print("Difference    (   %.1f x): %.9e" % (tnum/tsem, np.abs(1 - fnum()/fsem())))
+
+def PixelFlux(cx, cy, amp, x0, y0, sx, sy, rho, semi = True, **kwargs):
   '''
-  Animate the high resolution PRF with a random walk across the detector
   
   '''
-    
+  
+  if semi:
+    F = lambda y: PolyGaussIntegrand1D(y, cx, cy, amp, x0, y0, sx, sy, rho)
+    res, err = quad(F, 0, 1, **kwargs)
+  else:
+    F = lambda y, x: PolyGaussIntegrand2D(x, y, cx, cy, amp, x0, y0, sx, sy, rho)
+    res, err = dblquad(F, 0, 1, lambda x: 0, lambda x: 1, **kwargs)
+  return res
+
+def GenerateData(nx = 8, ny = 8, sx = 0.5, sy = 0.75, amp = 1.,
+                 rho = 0.3, cx = [0.75, 1, -1], cy = [0.75, 1, -1],
+                 motion_file = '201367065', data_file = '201367065', **kwargs):
+  '''
+  
+  '''
+  
+  # Vectorize the PSF params
+  rho = np.atleast_1d(rho)
+  sx = np.atleast_1d(sx)
+  sy = np.atleast_1d(sy)
+  amp = np.atleast_1d(amp)
+  
   # Load the motion vectors
-  motion_vectors = np.load('data/motion/201367065.npz')
-  x0 = motion_vectors['x0'][2140:] + nx / 2.
-  y0 = motion_vectors['y0'][2140:] + ny / 2.
-  cad = np.arange(0, len(x0))
+  motion_vectors = np.load('data/motion/%s.npz' % motion_file)
+  x0 = (motion_vectors['x0'] + nx / 2.).reshape(-1, 1)
+  y0 = (motion_vectors['y0'] + ny / 2.).reshape(-1, 1)
+  ncad = kwargs.pop('ncad', len(x0))
   
-  # Construct the grids
-  psv = 1 + eps * np.random.randn(ny, nx)
+  # Loop over the time and pixel arrays
+  fpix = np.zeros((ncad, nx, ny))
+  for n in prange(ncad):
+    for i in range(nx):
+      for j in range(ny):
+        fpix[n,j,i] = PixelFlux(cx, cy, amp, x0[n] - i, y0[n] - ny + j + 1, sx, sy, rho, **kwargs)
+
+  # Save
+  np.savez('data/flux/%s.npz' % data_file, fpix = fpix, nx = nx, ny = ny, sx = sx, sy = sy,
+           amp = amp, rho = rho, cx = cx, cy = cy, motion_file = motion_file, ncad = ncad)
+
+def PlotData(data_file = '201367065', res = 50, **kwargs):
+  '''
+  
+  '''
+  
+  # Load
+  data = np.load('data/flux/%s.npz' % data_file)
+  fpix = data['fpix']
+  ncad = data['ncad']
+  cad = np.arange(ncad)
+  nx, ny = fpix.shape[1], fpix.shape[2]
+  sx = data['sx']
+  sy = data['sy']
+  amp = data['amp']
+  rho = data['rho']
+  cx = data['cx']
+  cy = data['cy']
+  motion_file = data['motion_file']
+  motion_vectors = np.load('data/motion/%s.npz' % motion_file)
+  x0 = (motion_vectors['x0'][:ncad] + nx / 2.).reshape(-1, 1)
+  y0 = (motion_vectors['y0'][:ncad] + ny / 2.).reshape(-1, 1)
+  
+  # Inter-pixel variability
+  psv = 1 + 0.1 * np.random.randn(ny, nx)
   psvz = Zoom(psv, res)
+  fpix *= psv.reshape(-1, psv.shape[0], psv.shape[1])
+  flux = np.sum(fpix, axis = (1,2))
+  
+  #pl.plot(x0, flux, 'k.')
+  #pl.plot(y0, flux, 'r.')
+  #pl.show()
+  #quit()
+
+  # Compute the high res model
+  X, Y = Grid(nx, ny, res)
   ipv = IPV(nx, ny, res, cx, cy)
-  psf = PSF(nx, ny, res, x0[0], y0[0], sx, sy, amp, theta)
-  prf = psvz * ipv * psf
-  flx = Pixelate(prf, nx, ny, res)
+  fhires = psvz * ipv * np.sum([Gauss2D(X, Y, amp[k], x0[0][k], y0[0][k], sx[k], sy[k], rho[k]) for k in range(len(sx))], axis = 0)
+  fhires = np.flipud(fhires)
   
   # Plot
-  fig = pl.figure(figsize = (8,8))
+  fig = pl.figure(figsize = (8, 8))
   fig.subplots_adjust(top = 0.95, bottom = 0.1, left = 0.1, right = 0.95, wspace = 0.05, hspace = 0.1)
   axhi = pl.subplot2grid((4, 2), (0, 0), colspan = 1, rowspan = 2)
   axlo = pl.subplot2grid((4, 2), (0, 1), colspan = 1, rowspan = 2)  
-  axx0 = pl.subplot2grid((4, 2), (2, 0), colspan = 2, rowspan = 1) 
-  axy0 = pl.subplot2grid((4, 2), (3, 0), colspan = 2, rowspan = 1) 
-  hires = axhi.imshow(prf, extent = (0, nx, 0, ny), origin = 'lower', aspect = 'auto')
-  lores = axlo.imshow(flx, extent = (0, nx, 0, ny), origin = 'lower', aspect = 'auto')
-  axx0.plot(cad, x0, 'k-', alpha = 0.75, lw = 1)
-  axy0.plot(cad, y0, 'k-', alpha = 0.75, lw = 1)
-  tracker1 = axx0.axvline(0, color = 'r')
-  tracker2 = axy0.axvline(0, color = 'r')
+  axm = pl.subplot2grid((4, 2), (2, 0), colspan = 2, rowspan = 1) 
+  axf = pl.subplot2grid((4, 2), (3, 0), colspan = 2, rowspan = 1) 
+  hires = axhi.imshow(fhires, extent = (0, nx, 0, ny), origin = 'lower', aspect = 'auto')
+  lores = axlo.imshow(fpix[0], extent = (0, nx, 0, ny), origin = 'lower', aspect = 'auto')
+  axm.plot(cad, x0, 'k-', alpha = 0.75, lw = 1)
+  axm.plot(cad, y0, 'r-', alpha = 0.75, lw = 1)
+  axf.plot(cad, flux, 'k.', alpha = 0.3, ms = 1)
+  tracker1 = axm.axvline(0, color = 'r')
+  tracker2 = axf.axvline(0, color = 'r')
 
   # Appearance
   for axis in [axhi, axlo]:
     axis.set_xticks([])
     axis.set_yticks([])
-  for axis in [axx0, axy0]:
+  for axis in [axf, axm]:
     axis.margins(0, None)
-  axx0.set_xticklabels([])
-  axx0.set_ylabel(r'$x_0$ (pixels)', fontsize = 12)
-  axy0.set_ylabel(r'$y_0$ (pixels)', fontsize = 12)
-  axy0.set_xlabel(r'Cadence', fontsize = 12)
+  axm.set_xticklabels([])
+  axm.set_ylabel(r'Position', fontsize = 12)
+  axf.set_ylabel(r'Flux', fontsize = 12)
+  axf.set_xlabel(r'Cadence', fontsize = 12)
   
   # Animate!
   def run(i):
-    psf = PSF(nx, ny, res, x0[i], y0[i], sx, sy, amp, theta)
-    prf = psvz * ipv * psf
-    flx = Pixelate(prf, nx, ny, res)
-    hires.set_data(prf)
-    lores.set_data(flx)
+    fhires = psvz * ipv * np.sum([Gauss2D(X, Y, amp[k], x0[i][k], y0[i][k], sx[k], sy[k], rho[k]) for k in range(len(sx))], axis = 0)
+    fhires = np.flipud(fhires)
+    hires.set_data(fhires)
+    lores.set_data(fpix[i])
     tracker1.set_xdata([i, i])
     tracker2.set_xdata([i, i])
     return hires, lores, tracker1, tracker2
     
-  ani = animation.FuncAnimation(fig, run, frames=len(x0), interval=10, repeat=True)
+  ani = animation.FuncAnimation(fig, run, frames=len(x0), interval = 1, repeat=True)
   pl.show()
 
-def LnLike(p, **kwargs):
-  '''
-  TODO!
-  
-  '''
-  
-  fpix = kwargs['fpix']
-  ipv_order = kwargs['ipv_order']
-  
-  sx = p[0]
-  sy = p[1]
-  theta = p[2]
-  eps = p[3]
-  cx = p[4:4+ipv_order+1]
-  cy = p[4+1+ipv_order:]
-  
-def RunMCMC():
-  '''
-  
-  '''
-  
-  # General params
-  nx = 8
-  ny = 8
-  res = 100
-  
-  # The "true" parameters
-  cx = [0.75, 1, -1]
-  cy = [0.75, 1, -1]
-  theta = 0.3
-  sx = 0.5
-  sy = 0.75
-  eps = 0.1
-  amp = 1
-  
-  # Load the motion vectors
-  motion_vectors = np.load('data/motion/201367065.npz')
-  x0 = motion_vectors['x0'][3500:] + nx / 2.
-  y0 = motion_vectors['y0'][3500:] + ny / 2.
-  ncad = len(x0)
-  
-  # Construct the sensitivity map
-  psv = 1 + eps * np.random.randn(ny, nx)
-  ipv = IPV(nx, ny, res, cx, cy)
-  
-  # Compute the pixel fluxes
-  fpix = np.empty((ncad, nx, ny))
-  for i in range(ncad):
-    psf = PSF(nx, ny, res, x0[i], y0[i], sx, sy, amp, theta)
-    prf = Zoom(psv, res) * ipv * psf
-    fpix[i] = Pixelate(prf, nx, ny, res)
-
-  # Our initial guess
-  p0 = np.concatenate([[np.abs(np.random.randn()), np.abs(np.random.randn()), 
-                        2 * np.pi * np.random.rand(), 0.1 * np.random.randn()], 
-                        np.random.randn(3), np.random.randn(3)])
-  ipv_order = len(cx) - 1
-  kwargs = dict(fpix = fpix, ipv_order = ipv_order)
-  
-  LnLike(p0, **kwargs)  
-  
-
 if __name__ == '__main__':
-  
-  Animate()
+  #GenerateData()
+  PlotData()
